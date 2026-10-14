@@ -55,7 +55,7 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <useNativeGit>false</useNativeGit>
+                    <useNativeGit>true</useNativeGit>
                     <dotGitDirectory>${project.basedir}/.git</dotGitDirectory>
                     <failOnNoGitDirectory>false</failOnNoGitDirectory>
                     <abbrevLength>7</abbrevLength>

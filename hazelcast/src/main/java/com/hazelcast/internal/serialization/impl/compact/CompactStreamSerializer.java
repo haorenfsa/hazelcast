@@ -16,6 +16,7 @@
 
 package com.hazelcast.internal.serialization.impl.compact;
 
+import com.hazelcast.config.ClassFilter;
 import com.hazelcast.config.CompactSerializationConfig;
 import com.hazelcast.config.CompactSerializationConfigAccessor;
 import com.hazelcast.config.InvalidConfigurationException;
@@ -56,6 +57,17 @@ import static com.hazelcast.internal.serialization.impl.SerializationConstants.T
  * </ul>
  */
 public class CompactStreamSerializer implements StreamSerializer<Object> {
+    // Backported from 5.7 DefaultSerializationServiceBuilder and ReflectiveClassFilter.
+    // This maintenance fork deliberately does not expose a switch to disable the restrictions.
+    private static final ClassFilter REFLECTIVE_BLOCKLIST = new ClassFilter()
+            .addPrefixes("java.", "javax.", "com.sun.", "sun.", "jdk.", "com.hazelcast.shaded")
+            .addPackages("org.jctools.queues")
+            .addClasses("com.hazelcast.internal.serialization.impl.HeapData",
+                    "com.hazelcast.internal.nio.Packet",
+                    "com.hazelcast.internal.serialization.impl.UnsafeObjectDataInput",
+                    "com.hazelcast.kubernetes.KubernetesConfig$DefaultFileContentsReader",
+                    "org.agrona.concurrent.status.AtomicCounter");
+
     private final Map<Class, CompactSerializableRegistration> classToRegistrationMap = new ConcurrentHashMap<>();
     private final Map<String, CompactSerializableRegistration> typeNameToRegistrationMap = new ConcurrentHashMap<>();
     private final Map<Class, Schema> classToSchemaMap = new ConcurrentHashMap<>();
@@ -220,6 +232,7 @@ public class CompactStreamSerializer implements StreamSerializer<Object> {
 
     private CompactSerializableRegistration getOrCreateRegistration(Class clazz) {
         return classToRegistrationMap.computeIfAbsent(clazz, aClass -> {
+            verifyReflectiveClass(clazz);
             CompactSerializer serializer = javaRecordSerializer.isRecord(aClass) ? javaRecordSerializer : reflectiveSerializer;
             return new CompactSerializableRegistration(aClass, aClass.getName(), serializer);
         });
@@ -257,7 +270,23 @@ public class CompactStreamSerializer implements StreamSerializer<Object> {
             return CompactSerializableRegistration.GENERIC_RECORD_REGISTRATION;
         }
 
+        if (isReflectiveClassRestricted(clazz)) {
+            // The remote schema is data, not permission to construct an internal/JDK object.
+            return CompactSerializableRegistration.GENERIC_RECORD_REGISTRATION;
+        }
         return getOrCreateRegistration(clazz);
+    }
+
+    private static boolean isReflectiveClassRestricted(Class<?> clazz) {
+        return clazz.getPackage() == null || REFLECTIVE_BLOCKLIST.isListed(clazz.getName());
+    }
+
+    private static void verifyReflectiveClass(Class<?> clazz) {
+        if (isReflectiveClassRestricted(clazz)) {
+            throw new HazelcastSerializationException("The '" + clazz + "' cannot be serialized with zero configuration "
+                    + "Compact serialization because this class is restricted. If you want to serialize this class, "
+                    + "consider writing an explicit CompactSerializer for it.");
+        }
     }
 
     private GenericRecord readGenericRecord(BufferObjectDataInput input, Schema schema, boolean schemaIncludedInBinary) {
@@ -307,6 +336,10 @@ public class CompactStreamSerializer implements StreamSerializer<Object> {
 
     private void saveRegistration(CompactSerializableRegistration registration) {
         Class clazz = registration.getClazz();
+        CompactSerializer serializer = registration.getSerializer();
+        if (serializer == reflectiveSerializer || serializer == javaRecordSerializer) {
+            verifyReflectiveClass(clazz);
+        }
         CompactSerializableRegistration existing = classToRegistrationMap.putIfAbsent(clazz, registration);
         if (existing != null) {
             throw new InvalidConfigurationException("Duplicate serializer registrations "
